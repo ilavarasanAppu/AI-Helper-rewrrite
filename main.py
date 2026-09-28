@@ -61,7 +61,7 @@ def load_config():
     except Exception:
         return {
             "ollama_url": "http://localhost:11434",
-            "default_model": "lfm2.5-thinking:latest",
+            "default_model": "lfm2.5:ela",
             "keep_alive": "2m",
             "whisper_model_size": "base",
             "enable_clipboard_monitor": True,

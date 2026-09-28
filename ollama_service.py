@@ -86,7 +86,7 @@ class OllamaService:
     }
 
     def __init__(self, base_url: str = "http://localhost:11434",
-                 default_model: str = "lfm2.5-thinking:latest",
+                 default_model: str = "lfm2.5:ela",
                  keep_alive: str = "2m"):
         self.base_url = base_url.rstrip("/")
         self.default_model = default_model
@@ -94,8 +94,29 @@ class OllamaService:
         self._selected_model = None
         self._resolve_model()
 
+    # Cloud-only / remote models are advertised as installed but cannot run
+    # locally via /api/generate — they return Template: N/A and produce no
+    # results.  We exclude them so get_available_models() only returns models
+    # that actually work with the local Ollama server.
+    _CLOUD_MODEL_MARKERS = (":cloud", ":remote", "-cloud", "-remote")
+
+    @classmethod
+    def _is_cloud_model(cls, model_name: str) -> bool:
+        """Return True for cloud-only models that are not locally runnable."""
+        lower = model_name.lower()
+        if any(marker in lower for marker in cls._CLOUD_MODEL_MARKERS):
+            return True
+        # Cloud models typically have no template / return Template: N/A
+        # We also detect them at the /api/show level in get_available_models.
+        return False
+
     def get_available_models(self) -> list[str]:
-        """Fetch list of installed models from Ollama."""
+        """Fetch list of installed *local* models from Ollama.
+
+        Cloud-only models (e.g. ``nemotron-3-ultra:cloud``) are excluded because
+        they cannot be used via the local ``/api/generate`` endpoint — they have
+        no Modelfile template and produce no results.
+        """
         try:
             req = urllib.request.Request(
                 f"{self.base_url}/api/tags",
@@ -105,13 +126,54 @@ class OllamaService:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             if isinstance(data, list):
-                return [m.get("name") for m in data if isinstance(m, dict)]
+                raw_models = [m.get("name") for m in data if isinstance(m, dict)]
             elif isinstance(data, dict):
-                models = data.get("models", [])
-                return [m.get("name") for m in models if isinstance(m, dict)]
+                raw_models = [m.get("name") for m in data.get("models", []) if isinstance(m, dict)]
+            else:
+                raw_models = []
+
+            # Filter: remove embed models, cloud/remote models, and any model
+            # whose /api/show reports no template (Template: N/A == not local).
+            local_models = []
+            for name in raw_models:
+                if not name:
+                    continue
+                if "embed" in name.lower() or "bge" in name.lower():
+                    continue
+                if self._is_cloud_model(name):
+                    continue
+                # Verify the model has a usable local template via /api/show
+                if self._has_local_template(name):
+                    local_models.append(name)
+                else:
+                    # /api/show returned no template — likely a cloud/remote model
+                    # that slipped through.  Exclude it to prevent "no results".
+                    continue
+            return local_models
         except Exception:
             pass
         return []
+
+    def _has_local_template(self, model_name: str) -> bool:
+        """Check whether *model_name* has a real Modelfile template (i.e. is a local model)."""
+        try:
+            req = urllib.request.Request(
+                f"{self.base_url}/api/show",
+                data=json.dumps({"name": model_name}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                info = json.loads(resp.read().decode("utf-8"))
+            template = info.get("template") or info.get("modelfile", "")
+            # If template is missing/empty/N/A, the model is not a local GGUF model
+            if not template or template.strip() in ("N/A", ""):
+                return False
+            return True
+        except Exception:
+            # If /api/show fails, be conservative: assume it's usable (don't
+            # exclude by default, let the generation path report the error).
+            return True
 
     def _resolve_model(self):
         """Ensure default_model exists in Ollama; fallback to an available model if not."""
@@ -124,10 +186,10 @@ class OllamaService:
         if any(m == self.default_model or m.startswith(self.default_model.split(":")[0]) for m in available):
             self._selected_model = self.default_model
         else:
-            # Fallback to first non-embed model or first available model
+            # Fallback to first non-embed, non-cloud model (already filtered above)
             valid = [m for m in available if "embed" not in m.lower() and "bge" not in m.lower()]
             fallback = valid[0] if valid else available[0]
-            print(f"⚠️  Configured model '{self.default_model}' not found in Ollama. Falling back to '{fallback}'.")
+            print(f"Configurable model '{self.default_model}' not found in Ollama. Falling back to '{fallback}'.")
             self.default_model = fallback
             self._selected_model = fallback
 
@@ -138,8 +200,17 @@ class OllamaService:
         self._selected_model = model_name
 
     def stream_generate(self, prompt: str, system_prompt: str = "",
-                        model: str | None = None, temperature: float | None = None) -> Generator[str, None, None]:
-        """Stream a chat-style generation from Ollama. Yields response chunks."""
+                        model: str | None = None, temperature: float | None = None,
+                        max_tokens: int | None = None) -> Generator[str, None, None]:
+        """Stream a chat-style generation from Ollama. Yields response chunks.
+
+        IMPORTANT: Many local Ollama models (e.g. spark, phi, lfm2.5 variants) ship
+        with a Modelfile whose ``TEMPLATE`` is just ``{{ .Prompt }}`` — meaning the
+        ``system`` field is **never injected** into the model's input.  To guarantee
+        that our system instructions (rewrite-only, short-output, etc.) are actually
+        seen by the model, we **prepend** the system prompt to the user prompt and
+        also pass it via the ``system`` field (which works for well-behaved models).
+        """
         selected_model = model or self.default_model
         self.ensure_model_loaded(selected_model)
 
@@ -153,16 +224,43 @@ class OllamaService:
             else:
                 temperature = 0.6
 
+        # ─────────────────────────────────────────────────────────────
+        # FIX: Prepend system prompt to the prompt itself.
+        # Many locally-pulled models have TEMPLATE {{ .Prompt }} which
+        # ignores the 'system' parameter entirely.  By embedding the
+        # instructions directly in the prompt we guarantee the model
+        # receives them — this is what fixes "long answers" (system
+        # prompt was being silently dropped) and "no results" for
+        # models that don't know how to handle a bare prompt.
+        # ─────────────────────────────────────────────────────────────
+        if system_prompt:
+            full_prompt = system_prompt + "\n\n" + prompt
+        else:
+            full_prompt = prompt
+
+        # Determine a sensible max_tokens to prevent runaway long answers.
+        # Rewrite/writing_assist should be very short; explain/summarize
+        # moderate; everything else a reasonable cap.
+        if max_tokens is None:
+            if "GRAMMAR REWRITE ENGINE" in system_prompt or "TEXT-TO-TEXT POLISHING" in system_prompt or "WRITING ASSISTANT" in system_prompt or "SHORT RESULT" in system_prompt:
+                max_tokens = 120          # short polish / fixing
+            elif "PART 1" in system_prompt or "PART 2" in system_prompt:
+                max_tokens = 2048         # plan mode needs full detail
+            else:
+                max_tokens = 256          # explain/summarize/translate/etc.
+
         payload = {
             "model": selected_model,
-            "prompt": prompt,
-            "system": system_prompt,
+            "prompt": full_prompt,
+            "system": system_prompt,   # still sent for well-behaved models
             "stream": True,
             "keep_alive": self.keep_alive,
+            "think": False,            # disable thinking blocks — they bloat output and cause "long answers"
             "options": {
                 "temperature": temperature,
                 "top_p": 0.9 if temperature > 0.3 else 0.85,
-                "repeat_penalty": 1.05
+                "repeat_penalty": 1.05,
+                "num_predict": max_tokens,
             }
         }
 
@@ -173,7 +271,7 @@ class OllamaService:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=45) as response:
+            with urllib.request.urlopen(req, timeout=120) as response:
                 for line in response:
                     if not line:
                         continue
@@ -184,7 +282,7 @@ class OllamaService:
                     if chunk.get("done", False):
                         break
         except Exception as e:
-            yield f"\n[Error connecting to Ollama: {str(e)}. Ensure 'ollama serve' is running and model '{selected_model}' is available.]"
+            yield f"\n[Error connecting to Ollama: {str(e)}. Ensure 'ollama serve' is running and model '{selected_model}' is available. Note: cloud-only models (e.g. '*:cloud') cannot be used via local /api/generate.]"
 
     def get_action_prompt(self, action_type: str, text: str, target_lang: str = "Tamil") -> tuple[str, str]:
         """Return (system_prompt, user_text) for the given action."""

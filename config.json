@@ -1,6 +1,6 @@
 {
   "ollama_url": "http://localhost:11434",
-  "default_model": "gemma3:1b-it-qat",
+  "default_model": "lfm2.5:ela",
   "keep_alive": "2m",
   "hotkeys": {
     "toggle_quick_bar": "<ctrl>+<alt>+g",
