@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QPoint, QUrl, QStringListModel
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QPoint, QUrl, QStringListModel, QMimeData
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit,
     QPushButton, QLabel, QFrame, QScrollArea, QApplication, QMessageBox,
@@ -496,6 +496,9 @@ class NearbySuggestionPopup(QWidget):
         self._last_action = "nearby"
         self._last_prompt = ""
         self.think_filter = ThinkFilter(on_thinking_state_change=self._on_thinking_state_changed)
+        self.suggest_worker = None
+        self.suggest_filter = ThinkFilter()
+        self._source_hwnd = None
 
         self.setWindowFlags(
             Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool
@@ -527,6 +530,70 @@ class NearbySuggestionPopup(QWidget):
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(8, 8, 8, 8)
         card_layout.setSpacing(6)
+
+        # ── Compact suggestion bar (✨ text + Apply + copy + expand + dismiss) ──
+        # Primary view when text is selected/copied: streams a writing-assist
+        # suggestion and lets the user paste it back over the original selection.
+        self.suggest_frame = QFrame(self.card)
+        self.suggest_frame.setStyleSheet("""
+            QFrame { background-color: #1a1a2e; border: 1px solid #4338ca; border-radius: 6px; }
+        """)
+        self.suggest_frame.hide()
+        sg_layout = QHBoxLayout(self.suggest_frame)
+        sg_layout.setContentsMargins(6, 5, 6, 5)
+        sg_layout.setSpacing(6)
+
+        self.suggest_label = QLabel("", self.suggest_frame)
+        self.suggest_label.setWordWrap(True)
+        self.suggest_label.setFixedWidth(320)
+        self.suggest_label.setStyleSheet("color: #a5b4fc; font-size: 11px; border: none;")
+        self.suggest_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.suggest_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        sg_layout.addWidget(self.suggest_label, 1)
+
+        self.suggest_apply_btn = QPushButton("✔ Apply", self.suggest_frame)
+        self.suggest_apply_btn.setFixedHeight(24)
+        self.suggest_apply_btn.setEnabled(False)
+        self.suggest_apply_btn.setStyleSheet("""
+            QPushButton { background-color: #4f46e5; color: #ffffff; border-radius: 5px; padding: 2px 9px; font-size: 11px; font-weight: bold; }
+            QPushButton:hover { background-color: #6366f1; }
+            QPushButton:disabled { background-color: #3f3f56; color: #71717a; }
+        """)
+        self.suggest_apply_btn.clicked.connect(self._apply_selection_suggestion)
+        sg_layout.addWidget(self.suggest_apply_btn)
+
+        self.suggest_copy_btn = QPushButton("📋", self.suggest_frame)
+        self.suggest_copy_btn.setFixedSize(28, 24)
+        self.suggest_copy_btn.setEnabled(False)
+        self.suggest_copy_btn.setToolTip("Copy suggestion")
+        self.suggest_copy_btn.setStyleSheet("""
+            QPushButton { background-color: #272730; color: #e4e4e7; border-radius: 5px; font-size: 11px; }
+            QPushButton:hover { background-color: #3f3f4e; }
+            QPushButton:disabled { color: #52525b; }
+        """)
+        self.suggest_copy_btn.clicked.connect(self._copy_selection_suggestion)
+        sg_layout.addWidget(self.suggest_copy_btn)
+
+        self.suggest_expand_btn = QPushButton("↗️", self.suggest_frame)
+        self.suggest_expand_btn.setFixedSize(28, 24)
+        self.suggest_expand_btn.setToolTip("More actions (Rewrite, Translate, Ask AI…)")
+        self.suggest_expand_btn.setStyleSheet("""
+            QPushButton { background-color: #272730; color: #e4e4e7; border-radius: 5px; font-size: 11px; }
+            QPushButton:hover { background-color: #4338ca; color: #ffffff; }
+        """)
+        self.suggest_expand_btn.clicked.connect(self._show_full_view)
+        sg_layout.addWidget(self.suggest_expand_btn)
+
+        self.suggest_dismiss_btn = QPushButton("✕", self.suggest_frame)
+        self.suggest_dismiss_btn.setFixedSize(24, 24)
+        self.suggest_dismiss_btn.setStyleSheet("""
+            QPushButton { color: #a1a1aa; background: none; border: none; font-size: 11px; font-weight: bold; }
+            QPushButton:hover { color: #ef4444; }
+        """)
+        self.suggest_dismiss_btn.clicked.connect(self.hide)
+        sg_layout.addWidget(self.suggest_dismiss_btn)
+
+        card_layout.addWidget(self.suggest_frame)
 
         # Header row: model selection dropdown + preview text + close button
         header_row = QHBoxLayout()
@@ -564,6 +631,7 @@ class NearbySuggestionPopup(QWidget):
         header_row.addWidget(self.model_combo)
         header_row.addWidget(self.preview_label, 1)
         header_row.addWidget(close_btn)
+        self._header_widgets = [self.model_combo, self.preview_label, close_btn]
         card_layout.addLayout(header_row)
 
         # Action chips row
@@ -581,6 +649,7 @@ class NearbySuggestionPopup(QWidget):
             ("↗️ Open", "expand"),
         ]
 
+        self.chip_buttons = []
         for label, act in action_chips:
             btn = QPushButton(label, self.card)
             btn.setFixedHeight(24)
@@ -594,6 +663,7 @@ class NearbySuggestionPopup(QWidget):
             """)
             btn.clicked.connect(lambda checked, a=act: self.on_chip_clicked(a))
             self.chips_layout.addWidget(btn)
+            self.chip_buttons.append(btn)
 
         card_layout.addLayout(self.chips_layout)
 
@@ -692,7 +762,6 @@ class NearbySuggestionPopup(QWidget):
         if not text or not text.strip():
             return
 
-        self.refresh_model_dropdown()
         self.selected_text = text.strip()
         truncated = self.selected_text.replace("\n", " ")
         if len(truncated) > 40:
@@ -701,16 +770,64 @@ class NearbySuggestionPopup(QWidget):
         prefix = "📋 Selected" if trigger_type == "selection" else ("✂️ Copied" if trigger_type == "copy" else "📝 Text")
         self.preview_label.setText(f"{prefix}: \"{truncated}\"")
 
-        # Reset mini views
-        self.ask_container.hide()
-        self.output_view.hide()
-        self.status_label.hide()
-        self.output_view.clear()
+        # Remember the app that owned the selection so Apply can paste back into it
+        self._source_hwnd = self._capture_source_hwnd(x, y)
 
-        # Adjust size and position
+        # Selection/copy of natural-language text → auto-run writing assist and
+        # show the compact ✨ Suggestion bar (Apply / copy / expand / dismiss).
+        # Long passages are skipped: writing_assist output is token-capped, so
+        # Apply could otherwise paste a truncated rewrite.
+        use_suggestion = (
+            trigger_type in ("selection", "copy")
+            and any(c.isalpha() for c in self.selected_text)
+            and len(self.selected_text) <= 500
+        )
+
+        if use_suggestion:
+            self._enter_suggestion_mode()
+        else:
+            self._enter_full_view()
+
         self.adjustSize()
-        self.resize(430, self.height())
+        if not use_suggestion:
+            self.resize(430, self.height())  # fixed-width chip layout
 
+        self._place_near(x, y)
+
+        self.show()
+        self.raise_()
+        if not use_suggestion:
+            self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+            self.activateWindow()
+
+        if use_suggestion:
+            self._start_suggestion()
+
+    def _capture_source_hwnd(self, x: int = None, y: int = None):
+        """Window that owns the selection: the top-level window at the selection
+        point (stable even if the user switches windows), else the foreground one."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u32 = ctypes.windll.user32
+            hwnd = 0
+            if x is not None and y is not None and (x, y) != (0, 0):
+                u32.WindowFromPoint.argtypes = [wintypes.POINT]
+                u32.WindowFromPoint.restype = wintypes.HWND
+                u32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+                u32.GetAncestor.restype = wintypes.HWND
+                point_at = u32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+                if point_at:
+                    hwnd = int(u32.GetAncestor(point_at, 2) or 0)  # GA_ROOT
+            if not hwnd or hwnd == int(self.winId()):
+                hwnd = int(u32.GetForegroundWindow() or 0)
+            if not hwnd or hwnd == int(self.winId()):
+                return None
+            return hwnd
+        except Exception:
+            return None
+
+    def _place_near(self, x: int = None, y: int = None):
         screen = QApplication.primaryScreen().geometry()
         if x is None or y is None or (x == 0 and y == 0):
             cursor_pos = QCursor.pos()
@@ -721,12 +838,193 @@ class NearbySuggestionPopup(QWidget):
         pos_y = min(y + 15, screen.height() - h - 15)
         pos_x = max(15, pos_x)
         pos_y = max(15, pos_y)
-
         self.move(pos_x, pos_y)
-        self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+
+    def _set_view_visible(self, suggestion: bool):
+        """Toggle between compact suggestion bar and the full chip popup."""
+        self.suggest_frame.setVisible(suggestion)
+        for wdg in self._header_widgets:
+            wdg.setVisible(not suggestion)
+        for btn in self.chip_buttons:
+            btn.setVisible(not suggestion)
+        if not suggestion:
+            self.ask_container.hide()
+            self.output_view.hide()
+            self.status_label.hide()
+            self.output_view.clear()
+        # In suggestion mode never steal keyboard focus from the app being edited
+        if bool(self.windowFlags() & Qt.WindowDoesNotAcceptFocus) != suggestion:
+            self.setWindowFlag(Qt.WindowDoesNotAcceptFocus, suggestion)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, suggestion)
+
+    def _enter_suggestion_mode(self):
+        self._set_view_visible(True)
+        self.suggest_label.setText("✍️ Checking…")
+        self.suggest_apply_btn.setEnabled(False)
+        self.suggest_copy_btn.setEnabled(False)
+
+    def _enter_full_view(self):
+        self.refresh_model_dropdown()
+        self._set_view_visible(False)
+
+    def _show_full_view(self):
+        """↗️ chip: swap the compact bar for the full chip popup in place."""
+        self._enter_full_view()
+        self.adjustSize()
+        self.resize(430, self.height())
+        self._place_near(self.x() - 10, self.y() - 15)
         self.show()
         self.raise_()
         self.activateWindow()
+
+    # ── Compact suggestion streaming (writing assist on selected text) ──
+    def _start_suggestion(self):
+        if self.suggest_worker and self.suggest_worker.isRunning():
+            try:
+                self.suggest_worker.chunk_received.disconnect(self._on_suggest_chunk)
+                self.suggest_worker.finished.disconnect(self._on_suggest_finished)
+            except Exception:
+                pass
+            try:
+                self.suggest_worker.terminate()
+                self.suggest_worker.wait(300)
+            except Exception:
+                pass
+
+        self.suggest_filter.reset()
+        sys_prompt, prompt = self.ollama.get_action_prompt("writing_assist", self.selected_text)
+
+        def _gen():
+            yield from self.ollama.stream_generate(prompt, system_prompt=sys_prompt)
+
+        self.suggest_worker = WorkerThread(_gen)
+        self.suggest_worker.chunk_received.connect(self._on_suggest_chunk)
+        self.suggest_worker.finished.connect(self._on_suggest_finished)
+        self.suggest_worker.start()
+
+    def _on_suggest_chunk(self, chunk: str):
+        filtered = self.suggest_filter.process_chunk(chunk)
+        if filtered:
+            current = self.suggest_label.text()
+            if current == "✍️ Checking…":
+                self.suggest_label.setText(filtered.strip())
+            else:
+                self.suggest_label.setText((current + filtered).strip())
+
+    def _on_suggest_finished(self):
+        flushed = self.suggest_filter.flush()
+        if flushed:
+            current = self.suggest_label.text()
+            if current == "✍️ Checking…":
+                self.suggest_label.setText(flushed.strip())
+            else:
+                self.suggest_label.setText((current + flushed).strip())
+
+        cleaned = clean_think_text(self.suggest_label.text()).strip()
+        # Models sometimes echo ✨/⭐ decorations despite the prompt directive
+        cleaned = re.sub(r"^(?:\s*[✨⭐]\s*)+", "", cleaned).strip()
+        # Nothing useful (or identical text) → close instead of offering a no-op Apply
+        if not cleaned or cleaned == "✍️ Checking…" or cleaned.lower() == self.selected_text.lower():
+            self.hide()
+            return
+        self.suggest_label.setText(f"✨ {cleaned}")
+        self.suggest_apply_btn.setEnabled(True)
+        self.suggest_copy_btn.setEnabled(True)
+        self.adjustSize()
+        self._place_near(self.x() - 10, self.y() - 15)
+
+    def _current_suggestion(self) -> str:
+        sug = self.suggest_label.text().strip()
+        # Drop our own prefix plus any decoration the model added
+        sug = re.sub(r"^(?:\s*[✨⭐]\s*)+", "", sug).strip()
+        if not sug or sug == "✍️ Checking…":
+            return ""
+        return sug
+
+    def _apply_selection_suggestion(self):
+        """Paste the suggestion over the original selection in the source app."""
+        sug = self._current_suggestion()
+        if not sug or not self.suggest_apply_btn.isEnabled():
+            return
+        src_hwnd = self._source_hwnd
+        snapshot = self._snapshot_clipboard()
+        self.hide()
+        QTimer.singleShot(100, lambda: self._focus_window(src_hwnd))
+        QTimer.singleShot(350, lambda: self._attempt_paste(src_hwnd, sug, snapshot, 0))
+
+    def _attempt_paste(self, src_hwnd, sug, snapshot, retry):
+        """Set clipboard + Ctrl+V — but only once the source app really has focus,
+        so a suggestion can never be pasted into the wrong window."""
+        try:
+            if src_hwnd:
+                import ctypes
+                fg_now = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+                if fg_now != src_hwnd:
+                    if retry < 2:
+                        self._focus_window(src_hwnd)
+                        QTimer.singleShot(300, lambda: self._attempt_paste(src_hwnd, sug, snapshot, retry + 1))
+                        return
+                    # Focus could not be restored → leave the suggestion on the
+                    # clipboard for a manual paste instead of writing it elsewhere.
+                    QApplication.clipboard().setText(sug)
+                    return
+            QApplication.clipboard().setText(sug)
+            try:
+                import pyautogui
+                pyautogui.hotkey("ctrl", "v")
+            except Exception:
+                return
+            if snapshot is not None:
+                QTimer.singleShot(900, lambda: self._restore_clipboard(snapshot))
+        except Exception:
+            pass
+
+    def _snapshot_clipboard(self):
+        """Keep the user's clipboard (text or image) so Apply can put it back."""
+        try:
+            mime = QApplication.clipboard().mimeData()
+            if mime.hasImage():
+                snap = QMimeData()
+                snap.setImageData(mime.imageData())
+                return snap
+            text = mime.text()
+            return text or None
+        except Exception:
+            return None
+
+    def _restore_clipboard(self, snapshot):
+        try:
+            if isinstance(snapshot, QMimeData):
+                QApplication.clipboard().setMimeData(snapshot)
+            elif snapshot:
+                QApplication.clipboard().setText(snapshot)
+        except Exception:
+            pass
+
+    def _focus_window(self, hwnd):
+        if not hwnd:
+            return
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            if not u32.IsWindow(hwnd):
+                return
+            if u32.IsIconic(hwnd):
+                u32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            u32.SetForegroundWindow(hwnd)
+            if u32.GetForegroundWindow() != hwnd:
+                u32.keybd_event(0x12, 0, 0, 0)     # Alt down (allows SetForegroundWindow)
+                u32.keybd_event(0x12, 0, 2, 0)     # Alt up
+                u32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+
+    def _copy_selection_suggestion(self):
+        sug = self._current_suggestion()
+        if sug and self.suggest_copy_btn.isEnabled():
+            QApplication.clipboard().setText(sug)
+            self.suggest_copy_btn.setText("✓")
+            QTimer.singleShot(1200, lambda: self.suggest_copy_btn.setText("📋"))
 
     def on_chip_clicked(self, action: str):
         if action == "expand":

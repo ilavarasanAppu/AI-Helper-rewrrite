@@ -88,10 +88,10 @@ Win-AI-Helper/
 
 | Field | Detail |
 |---|---|
-| **Flags** | `WindowStaysOnTopHint|FramelessWindowHint|Tool` + `WA_TranslucentBackground`, draggable |
-| **UI** | Card `#1a1a20` border `#4338ca`: header (model `QComboBox` + preview `Selected: "..."` 40 chars + ✕), chips row (Rewrite, Translate, Summary, Explain, Ask AI, Copy, Paste, Open), `ask_container` (HistoryLineEdit + Send), `output_view` (110px `QTextEdit` `#121216`), `status_label` |
-| **Key Methods** | `refresh_model_dropdown()` — `ollama.get_available_models()` → `⚡ model` <br>`show_near_position(text,x,y,trigger_type)` — truncates, resets views, `adjustSize`→430w, positions `x+10,y+15` clamped to screen, `raise+activate` <br>`on_chip_clicked(action)` — `expand`→`expand_requested`, `copy`→clipboard, `paste`→clipboard text→show ask, `ask`→show ask, else `run_ai_action` <br>`submit_ask()` — `selected_text -> prompt` + `You are helpful…` → `_execute_streaming` <br>`_execute_streaming` → `ThinkFilter` + `WorkerThread(ollama.stream_generate)` <br>`_on_finished` → `flush` → `clean_think_text` → `history.add_entry` → `✓ Ready` |
-| **Usage** | Triggered by `SelectionMonitor` or `Ctrl+Alt+X`. One-click AI without opening full window. |
+| **Flags** | `WindowStaysOnTopHint|FramelessWindowHint|Tool` + `WA_TranslucentBackground`, draggable; suggestion mode adds `WindowDoesNotAcceptFocus` + `WA_ShowWithoutActivating` (never steals focus from the edited app) |
+| **UI** | Two views toggled by `_set_view_visible(suggestion)`:<br>**Suggestion bar (default for selection/copy)** — `suggest_frame` `#1a1a2e` border `#4338ca`: `✍️ Checking…`→`✨ suggestion` label (320px, word-wrap, selectable) + `✔ Apply` (disabled until stream finishes) + `📋` copy + `↗️` expand + `✕` dismiss<br>**Full view (↗️ or non-text/long selection)** — header (model `QComboBox` + preview `Selected: "..."` 40 chars + ✕), chips row (Rewrite, Translate, Summary, Explain, Ask AI, Copy, Paste, Open), `ask_container` (HistoryLineEdit + Send), `output_view` (110px `QTextEdit` `#121216`), `status_label` |
+| **Key Methods** | `refresh_model_dropdown()` — `ollama.get_available_models()` → `⚡ model` <br>`show_near_position(text,x,y,trigger_type)` — captures source HWND, chooses view: selection/copy + letters + ≤500 chars → suggestion mode (`_enter_suggestion_mode` + `_start_suggestion`, no `activateWindow`) else full view; `_place_near` positions `x+10,y+15` clamped to screen <br>`_start_suggestion` → `get_action_prompt("writing_assist", text)` → `ThinkFilter` + `WorkerThread` → `_on_suggest_chunk` (accumulates into label) → `_on_suggest_finished` (clean; hide popup if empty/identical, else `✨ …` + enable Apply/Copy) <br>`_apply_selection_suggestion()` — snapshot clipboard (text/`QMimeData` image) → set suggestion → hide → +100ms focus source HWND (SetForegroundWindow + Alt-key fallback) → +350ms `pyautogui Ctrl+V` → +1000ms restore clipboard <br>`_show_full_view()` — ↗️ chip swaps to chip popup in place <br>`on_chip_clicked(action)` — `expand`→`expand_requested`, `copy`→clipboard, `paste`→clipboard text→show ask, `ask`→show ask, else `run_ai_action` <br>`submit_ask()` — `selected_text -> prompt` + `You are helpful…` → `_execute_streaming` <br>`_execute_streaming` → `ThinkFilter` + `WorkerThread(ollama.stream_generate)` <br>`_on_finished` → `flush` → `clean_think_text` → `history.add_entry` → `✓ Ready` |
+| **Usage** | Triggered by `SelectionMonitor` or `Ctrl+Alt+X` → auto-runs writing assist and shows the ✨ Suggestion bar; `✔ Apply` pastes over the original selection in the source app, `↗️` opens the full chip popup (then `Esc`/✕ closes, chips stream into `output_view`). |
 
 #### 3.2.3 `AIHelperWindow(QWidget)` — Quick Bar (Main)
 
@@ -241,9 +241,10 @@ Pillow
 ## 4. Data & Control Flow
 
 ```
-[Mouse drag / Ctrl+C] → SelectionMonitor (pynput) → HotkeyBridge signals → NearbySuggestionPopup.show_near_position
+[Mouse drag / Ctrl+C] → SelectionMonitor (pynput) → HotkeyBridge signals → NearbySuggestionPopup.show_near_position → suggestion mode: ✨ Suggestion bar → ✔ Apply (refocus source app → Ctrl+V → restore clipboard) / ↗️ full chip popup
        ↘ Ctrl+Alt+G/X/V → GlobalHotKeys → HotkeyBridge → AIHelperWindow.show_centered / process_selection / voice
 Typing in QuickBar input → _on_input_text_changed → 650ms Timer → writing_assist (Ollama, temp0.2, no skill) → suggestion bar → Apply/Copy
+Selection/Copy of natural language (≤500 chars) → writing_assist auto-stream → ✨ Suggestion bar → Apply pastes into source app
 Action click (Rewrite/Plan/…) → get_action_prompt → _run_action → WorkerThread(stream_generate) → ThinkFilter → output_view → clean_think_text → history.json
 Tray menu → toggles write config.json + startup registry/lnk
 ```

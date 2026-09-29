@@ -1,4 +1,5 @@
 import json
+import re
 import urllib.request
 from typing import Callable, Generator
 
@@ -92,6 +93,7 @@ class OllamaService:
         self.default_model = default_model
         self.keep_alive = keep_alive
         self._selected_model = None
+        self._cap_cache: dict[str, set[str]] = {}
         self._resolve_model()
 
     # Cloud-only / remote models are advertised as installed but cannot run
@@ -199,17 +201,110 @@ class OllamaService:
             model_name = self.default_model
         self._selected_model = model_name
 
+    def _model_capabilities(self, model_name: str) -> set[str]:
+        """Return the capability set reported by /api/show (cached)."""
+        cached = self._cap_cache.get(model_name)
+        if cached is not None:
+            return cached
+        caps: set[str] = set()
+        try:
+            req = urllib.request.Request(
+                f"{self.base_url}/api/show",
+                data=json.dumps({"model": model_name}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                info = json.loads(resp.read().decode("utf-8"))
+            caps = set(info.get("capabilities") or [])
+        except Exception:
+            caps = set()
+        self._cap_cache[model_name] = caps
+        return caps
+
+    def _thinking_headroom(self, model_name: str, base_tokens: int) -> int:
+        """Reasoning models burn ``num_predict`` on hidden thinking tokens.
+
+        Without extra budget the visible answer is truncated to nothing, which is
+        what made LFM2.5_Un:8b / lfm2.5:ela return a blank result.
+        """
+        if "thinking" not in self._model_capabilities(model_name):
+            return base_tokens
+        return min(max(base_tokens * 4, base_tokens + 512), 4096)
+
+    @staticmethod
+    def _strip_reasoning(text: str) -> str:
+        """Remove any reasoning markup that leaked into the visible answer."""
+        if not text:
+            return text
+        lt = chr(60)
+        gt = chr(62)
+        pairs = [
+            (lt + "think" + gt, lt + "/think" + gt),
+            (lt + "thought" + gt, lt + "/thought" + gt),
+        ]
+        for open_tag, close_tag in pairs:
+            text = re.sub(re.escape(open_tag) + ".*?" + re.escape(close_tag), "", text,
+                          flags=re.DOTALL | re.IGNORECASE)
+        return text
+
+    @classmethod
+    def _reasoning_markers(cls) -> list:
+        lt = chr(60)
+        sl = lt + chr(47)
+        gt = chr(62)
+        return [
+            lt + "think" + gt,
+            sl + "think" + gt,
+            lt + "thought" + gt,
+            sl + "thought" + gt,
+            lt + "think",
+            sl + "think",
+            lt + "thought",
+            sl + "thought",
+        ]
+
+    @classmethod
+    def _thinking_boundary(cls, text: str) -> int:
+        """Index of the first byte that is safe to emit.
+
+        Emits everything up to a complete reasoning tag, or up to a tag that is
+        still split across two stream chunks (``"<th"`` + ``"ink>"``), so the UI
+        never shows a partial or leaked reasoning marker.  A stray ``<`` that
+        cannot become a tag is released immediately.
+        """
+        low = text.lower()
+        n = len(text)
+        best = n
+        for marker in cls._reasoning_markers():
+            start = 0
+            while True:
+                idx = low.find(marker, start)
+                if idx == -1:
+                    break
+                best = min(best, idx)
+                start = idx + 1
+            # Tail of the buffer that is a strict prefix of this marker?
+            max_partial = min(len(marker) - 1, n)
+            if max_partial > 0 and low[n - max_partial:] == marker[:max_partial]:
+                best = min(best, n - max_partial)
+        return best
+
     def stream_generate(self, prompt: str, system_prompt: str = "",
                         model: str | None = None, temperature: float | None = None,
                         max_tokens: int | None = None) -> Generator[str, None, None]:
         """Stream a chat-style generation from Ollama. Yields response chunks.
 
-        IMPORTANT: Many local Ollama models (e.g. spark, phi, lfm2.5 variants) ship
-        with a Modelfile whose ``TEMPLATE`` is just ``{{ .Prompt }}`` — meaning the
-        ``system`` field is **never injected** into the model's input.  To guarantee
-        that our system instructions (rewrite-only, short-output, etc.) are actually
-        seen by the model, we **prepend** the system prompt to the user prompt and
-        also pass it via the ``system`` field (which works for well-behaved models).
+        Uses ``/api/chat`` (NOT ``/api/generate``) because models such as
+        ``phi_vision:ela`` ship a bare ``{{ .Prompt }}`` Modelfile template: the
+        raw ``/api/generate`` prompt is fed to the model with no role framing, so
+        it immediately emits EOS and returns an empty string.  ``/api/chat``
+        always wraps messages with proper role markers, which works for both
+        bare-template and full-template models.
+
+        The system prompt is passed as a real ``system`` message *and* echoed at
+        the top of the user content, so instructions survive templates that
+        ignore the system role.
         """
         selected_model = model or self.default_model
         self.ensure_model_loaded(selected_model)
@@ -224,65 +319,92 @@ class OllamaService:
             else:
                 temperature = 0.6
 
-        # ─────────────────────────────────────────────────────────────
-        # FIX: Prepend system prompt to the prompt itself.
-        # Many locally-pulled models have TEMPLATE {{ .Prompt }} which
-        # ignores the 'system' parameter entirely.  By embedding the
-        # instructions directly in the prompt we guarantee the model
-        # receives them — this is what fixes "long answers" (system
-        # prompt was being silently dropped) and "no results" for
-        # models that don't know how to handle a bare prompt.
-        # ─────────────────────────────────────────────────────────────
         if system_prompt:
             full_prompt = system_prompt + "\n\n" + prompt
         else:
             full_prompt = prompt
 
-        # Determine a sensible max_tokens to prevent runaway long answers.
-        # Rewrite/writing_assist should be very short; explain/summarize
-        # moderate; everything else a reasonable cap.
+        # Determine a sensible token budget (visible answer budget).
         if max_tokens is None:
             if "GRAMMAR REWRITE ENGINE" in system_prompt or "TEXT-TO-TEXT POLISHING" in system_prompt or "WRITING ASSISTANT" in system_prompt or "SHORT RESULT" in system_prompt:
-                max_tokens = 120          # short polish / fixing
+                max_tokens = 240          # short polish / fixing
             elif "PART 1" in system_prompt or "PART 2" in system_prompt:
                 max_tokens = 2048         # plan mode needs full detail
             else:
-                max_tokens = 256          # explain/summarize/translate/etc.
+                max_tokens = 512          # explain/summarize/translate/etc.
+
+        # Reasoning models spend part of num_predict on hidden thinking tokens.
+        num_predict = self._thinking_headroom(selected_model, max_tokens)
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": full_prompt})
 
         payload = {
             "model": selected_model,
-            "prompt": full_prompt,
-            "system": system_prompt,   # still sent for well-behaved models
+            "messages": messages,
             "stream": True,
             "keep_alive": self.keep_alive,
-            "think": False,            # disable thinking blocks — they bloat output and cause "long answers"
             "options": {
                 "temperature": temperature,
                 "top_p": 0.9 if temperature > 0.3 else 0.85,
                 "repeat_penalty": 1.05,
-                "num_predict": max_tokens,
+                "num_predict": num_predict,
             }
         }
+        # Only send ``think`` for models that advertise the capability — Ollama
+        # returns HTTP 400 for think=True on non-reasoning models (phi_vision).
+        if "thinking" in self._model_capabilities(selected_model):
+            payload["think"] = False
 
         req = urllib.request.Request(
-            f"{self.base_url}/api/generate",
+            f"{self.base_url}/api/chat",
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}
         )
 
+        pending = ""
         try:
-            with urllib.request.urlopen(req, timeout=120) as response:
+            with urllib.request.urlopen(req, timeout=300) as response:
                 for line in response:
-                    if not line:
+                    if not line.strip():
                         continue
                     chunk = json.loads(line.decode("utf-8"))
-                    resp_text = chunk.get("response", "")
-                    if resp_text:
-                        yield resp_text
+                    if chunk.get("error"):
+                        yield f"\n[Ollama error: {chunk['error']}]"
+                        return
+                    msg = chunk.get("message") or {}
+                    # ``message.thinking`` carries the reasoning trace; it is
+                    # deliberately NOT yielded so the UI only sees the answer.
+                    raw = msg.get("content", "") or ""
+                    if raw:
+                        pending += raw
+                        # Drop any complete reasoning block that arrived, then
+                        # hold back text that may still be the start of a tag.
+                        pending = self._strip_reasoning(pending)
+                        boundary = self._thinking_boundary(pending)
+                        if boundary:
+                            emit, pending = pending[:boundary], pending[boundary:]
+                            if emit:
+                                yield emit
                     if chunk.get("done", False):
                         break
         except Exception as e:
-            yield f"\n[Error connecting to Ollama: {str(e)}. Ensure 'ollama serve' is running and model '{selected_model}' is available. Note: cloud-only models (e.g. '*:cloud') cannot be used via local /api/generate.]"
+            yield f"\n[Error connecting to Ollama: {str(e)}. Ensure 'ollama serve' is running and model '{selected_model}' is available. Note: cloud-only models (e.g. '*:cloud') cannot be used via the local /api/chat endpoint.]"
+            return
+
+        # Final flush: drop any reasoning tag that was never closed (truncated
+        # generation) instead of leaking the marker into the UI.
+        low = pending.lower()
+        for opener in (chr(60) + "think" + chr(62), chr(60) + "thought" + chr(62)):
+            idx = low.find(opener)
+            if idx != -1:
+                pending = pending[:idx]
+                break
+        cleaned = self._strip_reasoning(pending).strip()
+        if cleaned:
+            yield cleaned
 
     def get_action_prompt(self, action_type: str, text: str, target_lang: str = "Tamil") -> tuple[str, str]:
         """Return (system_prompt, user_text) for the given action."""
@@ -357,7 +479,7 @@ class OllamaService:
             else:
                 # Generic ask: short result, no thinking
                 sys_prompt = base_p + self.STRICT_SUFFIX + "\n\nSHORT RESULT: Keep answer concise (1-4 lines) if input is a sentence to correct; otherwise direct answer only."
-            return sys_prompt, text
+        return sys_prompt, text
 
     def get_model_name(self) -> str:
         return self._selected_model or self.default_model

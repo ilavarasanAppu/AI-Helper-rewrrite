@@ -89,15 +89,15 @@ Select or copy any text anywhere in Windows and an AI suggestion bar appears ins
 | Shortcut | Action |
 |---|---|
 | `Ctrl + Alt + G` | Open the **Quick Bar** (spotlight-style AI prompt window) |
-| `Ctrl + Alt + X` | Process **clipboard content** with AI (shows nearby action bar) |
+| `Ctrl + Alt + X` | Process **clipboard content** with AI (shows nearby suggestion bar) |
 | `Ctrl + Alt + V` | Toggle **Voice input** mode (speech-to-text) |
 
 ### Automatic Triggers (No Hotkey Needed)
 
 | Trigger | What Happens |
 |---|---|
-| **Select text** (mouse drag) in any app | A floating AI suggestion bar appears near your cursor |
-| **Copy text** (`Ctrl+C`) in any app | The AI suggestion bar appears with smart actions |
+| **Select text** (mouse drag) in any app | A compact **✨ suggestion bar** appears near your cursor with a polished rewrite: `✔ Apply` pastes it over the selection, `📋` copies, `↗️` opens more actions |
+| **Copy text** (`Ctrl+C`) in any app | The same suggestion bar appears for the copied text |
 
 ---
 
