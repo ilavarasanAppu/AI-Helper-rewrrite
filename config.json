@@ -1,7 +1,34 @@
 {
   "ollama_url": "http://localhost:11434",
   "default_model": "lfm2.5:ela",
+  "fallback_model": "qwen2.5:7b",
   "keep_alive": "2m",
+  "theme": "system",
+  "ai_provider": "ollama",
+  "providers": {
+    "ollama": {
+      "enabled": true,
+      "endpoint": "http://localhost:11434",
+      "models": [],
+      "default_model": "lfm2.5:ela",
+      "fallback_model": "qwen2.5:7b"
+    },
+    "lm_studio": {
+      "enabled": true,
+      "endpoint": "http://localhost:1234/v1",
+      "models": [],
+      "default_model": "",
+      "fallback_model": ""
+    },
+    "openai": {
+      "enabled": true,
+      "endpoint": "https://api.openai.com/v1",
+      "api_key": "",
+      "models": [],
+      "default_model": "",
+      "fallback_model": ""
+    }
+  },
   "hotkeys": {
     "toggle_quick_bar": "<ctrl>+<alt>+g",
     "process_selection": "<ctrl>+<alt>+x",
@@ -12,6 +39,8 @@
   "tts_rate": 180,
   "enable_clipboard_monitor": true,
   "clipboard_poll_interval_ms": 500,
+  "history_store_success_only": true,
+  "history_store_initiated": true,
   "_note": "Hotkeys use Ctrl+Alt+G/X/V. Alt+Space is reserved by Windows Explorer and cannot be captured by pynput, so Ctrl+Alt+G is used as the quick-bar opener.",
   "auto_startup": true,
   "first_run_complete": true
