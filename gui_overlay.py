@@ -2,9 +2,9 @@ from PySide6.QtCore import Qt, QThread, Signal, QTimer, QPoint, QUrl, QStringLis
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit,
     QPushButton, QLabel, QFrame, QScrollArea, QApplication, QMessageBox,
-    QComboBox, QCompleter, QDialog, QFormLayout, QMenu, QAction
+    QComboBox, QCompleter, QDialog, QFormLayout, QMenu
 )
-from PySide6.QtGui import QFont, QColor, QPalette, QClipboard, QPixmap, QPainter, QCursor
+from PySide6.QtGui import QFont, QColor, QPalette, QClipboard, QPixmap, QPainter, QCursor, QAction
 import os
 import re
 import time
@@ -769,6 +769,76 @@ class AIHelperWindow(QWidget):
                     else:
                         self.writing_suggest_frame.hide(); self._writing_timer.stop()
         self.input_field.textChanged.connect(_on_input_text_changed)
+
+    # ── Writing Assistance handlers (grammar + improve, short result, no thinking) ──
+    def _request_writing_suggestion(self):
+        text = self.input_field.text().strip()
+        if not text or len(text) < 4 or text.startswith("/"):
+            self.writing_suggest_frame.hide()
+            return
+        active_skill = getattr(self.skill_manager, "active_skill_name", "")
+        if active_skill in ("💻 Code Only", "📋 JSON Format Only") or "code" in active_skill.lower():
+            return
+        if text == getattr(self, "_writing_last_text", ""):
+            return
+        self._writing_last_text = text
+        # Stop previous worker
+        if self._writing_worker and self._writing_worker.isRunning():
+            try:
+                self._writing_worker.terminate()
+                self._writing_worker.wait(300)
+            except Exception:
+                pass
+        self.writing_suggest_label.setText("✍️ Checking…")
+        self.writing_suggest_frame.show()
+        self._writing_think_filter.reset()
+        sys_prompt, prompt = self.ollama.get_action_prompt("writing_assist", text)
+        def _gen():
+            yield from self.ollama.stream_generate(prompt, system_prompt=sys_prompt)
+        self._writing_worker = WorkerThread(_gen)
+        self._writing_worker.chunk_received.connect(self._on_writing_chunk)
+        self._writing_worker.finished.connect(self._on_writing_finished)
+        self._writing_worker.start()
+
+    def _on_writing_chunk(self, chunk: str):
+        filtered = self._writing_think_filter.process_chunk(chunk)
+        if filtered:
+            current = self.writing_suggest_label.text()
+            if current == "✍️ Checking…":
+                self.writing_suggest_label.setText(filtered.strip())
+            else:
+                self.writing_suggest_label.setText((current + filtered).strip())
+
+    def _on_writing_finished(self):
+        flushed = self._writing_think_filter.flush()
+        if flushed:
+            cur = self.writing_suggest_label.text()
+            if cur == "✍️ Checking…":
+                self.writing_suggest_label.setText(flushed.strip())
+            else:
+                self.writing_suggest_label.setText((cur + flushed).strip())
+        cleaned = clean_think_text(self.writing_suggest_label.text())
+        inp = self.input_field.text().strip()
+        if not cleaned or cleaned.strip().lower() == inp.lower():
+            self.writing_suggest_frame.hide()
+            return
+        if len(cleaned) > 180:
+            cleaned = cleaned[:180].rsplit(" ", 1)[0] + "…"
+        self.writing_suggest_label.setText(f"✨ {cleaned}")
+
+    def _apply_writing_suggestion(self):
+        sug = self.writing_suggest_label.text().lstrip("✨ ").strip()
+        if sug and sug != "✍️ Checking…":
+            self.input_field.setText(sug)
+            self.writing_suggest_frame.hide()
+            self.input_field.setFocus()
+
+    def _copy_writing_suggestion(self):
+        sug = self.writing_suggest_label.text().lstrip("✨ ").strip()
+        if sug and sug != "✍️ Checking…":
+            QApplication.clipboard().setText(sug)
+            self.writing_copy_btn.setText("✅")
+            QTimer.singleShot(1200, lambda: self.writing_copy_btn.setText("📋"))
 
     def open_settings(self):
         dlg = SettingsDialog(self.config, self)

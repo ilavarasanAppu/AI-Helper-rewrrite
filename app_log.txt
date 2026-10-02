@@ -1,0 +1,15 @@
+
+[2026-10-02 20:56:12] Fatal error:
+Traceback (most recent call last):
+  File "C:\Github\Win-AI-Helper\main.py", line 522, in <module>
+    main()
+    ~~~~^^
+  File "C:\Github\Win-AI-Helper\main.py", line 445, in main
+    window = AIHelperWindow(ollama_svc, audio_svc, image_svc, config, history_manager=history_mgr)
+  File "C:\Github\Win-AI-Helper\gui_overlay.py", line 658, in __init__
+    self.init_ui(); self._detect_clipboard(); self._apply_theme(self.config.get("theme", "system"))
+    ~~~~~~~~~~~~^^
+  File "C:\Github\Win-AI-Helper\gui_overlay.py", line 740, in init_ui
+    self.writing_apply_btn = QPushButton("✔ Apply", self.writing_suggest_frame); self.writing_apply_btn.setFixedHeight(22); self.writing_apply_btn.setStyleSheet("QPushButton { background-color: #4f46e5; color: #ffffff; border-radius: 5px; padding: 2px 8px; font-size: 10px; font-weight: bold; } QPushButton:hover { background-color: #6366f1; }"); self.writing_apply_btn.clicked.connect(self._apply_writing_suggestion); ws_layout.addWidget(self.writing_apply_btn)
+                                                                                                                                                                                                                                                                                                                                                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'AIHelperWindow' object has no attribute '_apply_writing_suggestion'
