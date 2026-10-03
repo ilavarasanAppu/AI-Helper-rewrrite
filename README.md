@@ -109,7 +109,9 @@ Press `Ctrl + Alt + G` to open the Quick Bar — a floating, always-on-top windo
 
 - Type any question or request and get an AI response
 - Use quick action buttons on selected/clipboard text:
-  - **✍️ Rewrite** — Polish and improve text clarity & grammar
+     - **✍️ Rewrite** — Polish and improve text clarity & grammar (GRAMMAR REWRITE ENGINE, low temperature)
+  - **💬 Answer** — Get a short, direct answer only (no explanations)
+  - **⚖️ Diff** — Compare outputs from two models side-by-side with a diff view
   - **✨ Expand** — Enhance text with richer vocabulary and detail
   - **📋 Plan** — Break down objectives into step-by-step plans
   - **📖 Explain** — Get simple, clear explanations of concepts
@@ -126,7 +128,7 @@ Press `Ctrl + Alt + G` to open the Quick Bar — a floating, always-on-top windo
 
 When you select or copy text anywhere in Windows, a sleek floating popup appears near your cursor with one-click actions:
 
-- **Rewrite** / **Expand** / **Explain** / **Summarize** / **Plan** / **Translate**
+- **Rewrite** / **Explain** / **Summarize** / **Plan** / **Translate** / **Answer** / **Diff**
 - Click any action to get instant AI results in a compact popup
 - Click **Expand ↗** to open the full Quick Bar with the result
 

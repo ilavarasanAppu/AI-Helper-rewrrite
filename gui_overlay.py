@@ -34,6 +34,9 @@ class SettingsDialog(QDialog):
         self.provider_combo.setCurrentText(self.config.get("ai_provider", "ollama"))
 
         self.endpoint_input = QLineEdit(self)
+        self.api_key_input = QLineEdit(self)
+        self.api_key_input.setPlaceholderText("Bearer key (for OpenAI)")
+        self.api_key_input.setVisible(False)
         self.model_combo = QComboBox(self)
         self.default_model_combo = QComboBox(self)
         self.fallback_model_combo = QComboBox(self)
@@ -41,6 +44,7 @@ class SettingsDialog(QDialog):
         form.addRow("Theme", self.theme_combo)
         form.addRow("Provider", self.provider_combo)
         form.addRow("Endpoint", self.endpoint_input)
+        form.addRow("API Key", self.api_key_input)
         form.addRow("Model", self.model_combo)
         form.addRow("Default Model", self.default_model_combo)
         form.addRow("Fallback Model", self.fallback_model_combo)
@@ -62,15 +66,23 @@ class SettingsDialog(QDialog):
         self._load_saved_values()
 
     def _load_saved_values(self):
-        provider = self.config.get("ai_provider", "ollama")
+        provider = self.provider_combo.currentText().lower()
         providers = self.config.get("providers", {})
         provider_cfg = providers.get(provider, {})
         self.endpoint_input.setText(provider_cfg.get("endpoint", ""))
-        self._populate_model_lists(provider_cfg.get("models", []))
+        # Load API key for OpenAI
+        if provider == "openai":
+            self.api_key_input.setText(provider_cfg.get("api_key", ""))
+        # Populate models from saved config first, then try to fetch live
+        saved_models = provider_cfg.get("models", [])
+        if saved_models:
+            self._populate_model_lists(saved_models)
+        else:
+            self._load_provider_models(provider, self.endpoint_input.text())
         self.default_model_combo.setCurrentText(provider_cfg.get("default_model", ""))
         self.fallback_model_combo.setCurrentText(provider_cfg.get("fallback_model", ""))
-        self.model_combo.setCurrentText(self.config.get("default_model", ""))
-
+        if provider == "ollama":
+            self.model_combo.setCurrentText(self.config.get("default_model", ""))
     def _refresh_provider_state(self):
         provider = self.provider_combo.currentText().lower()
         endpoint = "http://localhost:11434"
@@ -79,16 +91,20 @@ class SettingsDialog(QDialog):
         elif provider == "openai":
             endpoint = "https://api.openai.com/v1"
         self.endpoint_input.setText(endpoint)
+        # Show/hide API key input based on provider
+        self.api_key_input.setVisible(provider == "openai")
         self.model_combo.clear(); self.default_model_combo.clear(); self.fallback_model_combo.clear()
         self._load_provider_models(provider, endpoint)
 
     def _populate_model_lists(self, models):
         self.model_combo.clear(); self.default_model_combo.clear(); self.fallback_model_combo.clear()
+        # Always include a fallback option so the dropdown is never empty
+        if not models:
+            models = ["gemma3:1b", "qwen2.5:7b", "lfm2.5:ela"]
         for name in models:
             self.model_combo.addItem(name)
             self.default_model_combo.addItem(name)
             self.fallback_model_combo.addItem(name)
-
     def _load_provider_models(self, provider, endpoint):
         models = []
         try:
@@ -137,6 +153,9 @@ class SettingsDialog(QDialog):
             "default_model": default_model,
             "fallback_model": fallback_model,
         }
+        # Save API key for OpenAI provider
+        if provider == "openai":
+            self.config["providers"][provider]["api_key"] = self.api_key_input.text().strip()
         try:
             with open(os.path.join(os.path.dirname(__file__), "config.json"), "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=2, ensure_ascii=False)
@@ -156,10 +175,13 @@ class QuickHelpDialog(QDialog):
         text = (
             "Commands\n"
             "- Rewrite: shortens and polishes text\n"
+            "- Explain: explain text in simpler terms\n"
+            "- Translate: convert to target language\n"
             "- Long: full rewrite with more complete wording\n"
             "- Improve: refine wording and clarity\n"
             "- Summarize: key points only\n"
-            "- Translate: convert to target language\n"
+            "- Answer: short answer only (no explanation)\n"
+            "- Diff: compare outputs from different AI models\n"
             "- Quick Help: show this dialog\n\n"
             "Tips\n"
             "- Leave the input blank to use clipboard text if available\n"
@@ -385,6 +407,20 @@ class WorkerThread(QThread):
             self.finished.emit()
 
 
+def _stream_diff(ollama_service, prompt, system_prompt, model_a=None, model_b=None, temperature=0.6):
+    """Stream a diff comparison between two models."""
+    if model_a is None:
+        model_a = ollama_service.get_model_for_action("rewrite_short")
+    if model_b is None:
+        available = ollama_service.get_available_models()
+        model_b = available[0] if available and available[0] != model_a else ollama_service.default_model
+    result_a = ollama_service.generate_full(prompt, system_prompt, model=model_a, temperature=temperature)
+    result_b = ollama_service.generate_full(prompt, system_prompt, model=model_b, temperature=temperature)
+    diff_text = ollama_service._format_diff(result_a, result_b, model_a, model_b)
+    yield f"=== Model Comparison: {model_a} vs {model_b} ===\n\n"
+    yield diff_text
+
+
 class NearbySuggestionPopup(QWidget):
     expand_requested = Signal(str, str)
 
@@ -471,6 +507,8 @@ class NearbySuggestionPopup(QWidget):
             ("📋 Copy", "copy"),
             ("📋 Paste", "paste"),
             ("📝 Long", "rewrite_long"),
+            ("💬 Answer", "answer_mode"),
+            ("⚖️ Diff", "compare_diff"),
             ("💡 Help", "quick_help"),
         ]
         self.chip_buttons = []
@@ -599,7 +637,7 @@ class NearbySuggestionPopup(QWidget):
             self.ask_container.show(); self.ask_input.setFocus(); self.adjustSize(); return
         if action == "quick_help":
             dlg = QuickHelpDialog(self); dlg.exec_(); return
-        if action in ("rewrite_short", "rewrite_long", "improve", "feather"):
+        if action in ("rewrite_short", "rewrite_long", "improve", "feather", "answer_mode"):
             self.run_ai_action(action); return
         self.run_ai_action(action)
 
@@ -614,7 +652,41 @@ class NearbySuggestionPopup(QWidget):
     def run_ai_action(self, action: str):
         self._last_action = action; self._last_prompt = self.selected_text
         sys_prompt, prompt = self.ollama.get_action_prompt(action, self.selected_text)
-        self._execute_streaming(prompt, sys_prompt)
+        self._execute_streaming_with_model(prompt, sys_prompt, action)
+
+    def _execute_streaming_with_model(self, prompt: str, system_prompt: str, action: str):
+        """Stream generation with model-aware model selection."""
+        if self.worker and self.worker.isRunning():
+            try: self.worker.terminate(); self.worker.wait(300)
+            except Exception: pass
+        self.output_view.clear(); self.output_view.show()
+        self.status_label.setText("💭 Generating…"); self.status_label.show()
+        self.think_filter.reset(); self.adjustSize()
+        model = self.ollama.get_model_for_action(action)
+        temp = self.ollama._get_temperature_for_prompt(system_prompt)
+        def _gen():
+            yield from self.ollama.stream_generate(prompt, system_prompt=system_prompt, model=model, temperature=temp)
+        self.worker = WorkerThread(_gen); self.worker.chunk_received.connect(self._append_chunk); self.worker.finished.connect(self._on_finished); self.worker.start()
+
+    def _execute_streaming_raw(self, prompt: str, system_prompt: str, gen_func):
+        """Stream generation from a custom generator function."""
+        if self.worker and self.worker.isRunning():
+            try: self.worker.terminate(); self.worker.wait(300)
+            except Exception: pass
+        self.output_view.clear(); self.output_view.show()
+        self.status_label.setText("💭 Generating…"); self.status_label.show()
+        self.think_filter.reset(); self.adjustSize()
+        self.worker = WorkerThread(gen_func); self.worker.chunk_received.connect(self._append_chunk); self.worker.finished.connect(self._on_finished); self.worker.start()
+
+    def run_compare_diff(self):
+        self._last_action = "compare_diff"; self._last_prompt = self.selected_text
+        target_text = self.selected_text.strip()
+        if not target_text:
+            self.output_view.setPlainText("Please select text first for comparison."); return
+        sys_prompt, prompt = self.ollama.get_action_prompt("rewrite_short", target_text)
+        def _gen():
+            yield from _stream_diff(self.ollama, prompt, sys_prompt)
+        self._execute_streaming_raw(prompt, sys_prompt, _gen)
 
     def _execute_streaming(self, prompt: str, system_prompt: str):
         if self.worker and self.worker.isRunning():
@@ -638,7 +710,10 @@ class NearbySuggestionPopup(QWidget):
         if cleaned and hasattr(self, "history_manager") and self.history_manager:
             act = getattr(self, "_last_action", "nearby"); p_val = getattr(self, "_last_prompt", self.selected_text)
             self.history_manager.add_entry(act, p_val, cleaned, model=self.ollama.get_model_name())
-        self.status_label.setText("✓ Ready")
+        if getattr(self, "_last_action", "") == "compare_diff":
+            self.status_label.setText("⚖️ Diff complete")
+        else:
+            self.status_label.setText("✓ Ready")
 
     def _on_thinking_state_changed(self, is_thinking: bool):
         if is_thinking: self.status_label.setText("💭 Thinking...")
@@ -707,7 +782,8 @@ class AIHelperWindow(QWidget):
         self.lang_combo = QComboBox(self.card); self.lang_combo.setToolTip("Target Language for Translation"); self.lang_combo.addItems(["Tamil", "English", "Tanglish", "Hindi", "Malayalam", "Telugu", "French", "German", "Spanish", "Japanese"])
         self.lang_combo.setStyleSheet("QComboBox { background-color: #272730; color: #60a5fa; border: 1px solid #3f3f4e; border-radius: 5px; padding: 2px 6px; font-size: 10px; font-weight: bold; } QComboBox::drop-down { border: none; } QComboBox QAbstractItemView { background-color: #1e1e24; color: #e4e4e7; selection-background-color: #3f3f4e; }")
 
-        btn_layout = QHBoxLayout(); row_btns = [("✍️ Rewrite", "rewrite_short"), ("✨ Improve", "improve"), ("📋 Plan", "plan"), ("📖 Explain", "explain"), ("🌐 Translate", "translate"), ("📝 Summarize", "summarize"), ("📝 Long", "rewrite_long")]
+        btn_layout = QHBoxLayout(); btn_layout.setSpacing(6); btn_layout.setContentsMargins(0, 0, 0, 0)
+        row_btns = [("✍️ Rewrite", "rewrite_short"), ("✨ Improve", "improve"), ("📋 Plan", "plan"), ("📖 Explain", "explain"), ("🌐 Translate", "translate"), ("📝 Summarize", "summarize"), ("📝 Long", "rewrite_long"), ("💬 Answer", "answer_mode"), ("⚖️ Diff", "compare_diff")]
         for label, act in row_btns:
             btn = QPushButton(label, self.card); btn.setFixedHeight(26); btn.setToolTip(label)
             btn.setStyleSheet("QPushButton { background-color: #272730; color: #e4e4e7; border: 1px solid #3f3f4e; border-radius: 5px; padding: 2px 8px; font-size: 11px; min-width: 0; } QPushButton:hover { background-color: #3f3f4e; border-color: #71717a; }")
@@ -938,9 +1014,15 @@ class AIHelperWindow(QWidget):
             self.output_view.setPlainText("Please select or type text first."); return
         self._current_action_name = action_type; self._current_user_input = target_text
         target_lang = self.lang_combo.currentText() if hasattr(self, "lang_combo") else "Tamil"
+        if action_type == "compare_diff":
+            self._run_compare_diff_action(target_text, target_lang); return
+        if action_type == "answer_mode":
+            sys_prompt, prompt_text = self.ollama.get_action_prompt(action_type, target_text, target_lang=target_lang)
+            self._current_action_name = action_type; self._current_user_input = target_text
+            self._run_action_with_model(prompt_text, system_prompt=sys_prompt)
+            return
         sys_prompt, prompt_text = self.ollama.get_action_prompt(action_type, target_text, target_lang=target_lang)
         self._run_action(prompt_text, system_prompt=sys_prompt)
-
     def _on_thinking_state_changed(self, is_thinking: bool):
         model_name = self.ollama.get_model_name();
         if is_thinking: self.status_label.setText(f"💭 Thinking via {model_name}…")
@@ -961,13 +1043,53 @@ class AIHelperWindow(QWidget):
             self.history_manager.add_started_entry(getattr(self, "_current_action_name", "prompt"), getattr(self, "_current_user_input", user_input), self.ollama.get_model_name())
         model_name = self.ollama.get_model_name(); status_msg = f"⏳ Generating via {model_name}…"
         current_action = getattr(self, "_current_action_name", "")
-        if current_action in ("rewrite", "rewrite_short", "rewrite_long", "plan", "improve", "feather"):
+        if current_action in ("rewrite", "rewrite_short", "rewrite_long", "plan", "improve", "feather", "answer_mode", "compare_diff"):
             combined_sys = system_prompt.strip()
         else:
             skill_prompt = self.skill_manager.get_active_skill_prompt(); combined_sys = (skill_prompt + "\n\n" + system_prompt).strip()
         def _load_and_generate():
             yield from self.ollama.stream_generate(user_input, system_prompt=combined_sys)
         self.worker = WorkerThread(_load_and_generate); self.worker.chunk_received.connect(self._append_chunk); self.worker.finished.connect(self._on_worker_finished); self.status_label.setText(status_msg); self.worker.start()
+
+
+    def _run_action_with_model(self, user_input: str, system_prompt: str = ""):
+        """Run action with model-aware model selection."""
+        if hasattr(self, "worker") and self.worker and self.worker.isRunning():
+            try: self.worker.cancel(); self.worker.wait(500)
+            except Exception: pass
+        self.output_view.clear(); self.input_field.clear(); self.think_filter.reset()
+        if self.config.get("history_store_initiated", True):
+            self.history_manager.add_started_entry(getattr(self, "_current_action_name", "prompt"), getattr(self, "_current_user_input", user_input), self.ollama.get_model_name())
+        current_action = getattr(self, "_current_action_name", "")
+        model = self.ollama.get_model_for_action(current_action)
+        self.status_label.setText(f"⏳ Generating via {model}…")
+        temp = self.ollama._get_temperature_for_prompt(system_prompt)
+        def _gen():
+            yield from self.ollama.stream_generate(user_input, system_prompt=system_prompt, model=model, temperature=temp)
+        self.worker = WorkerThread(_gen); self.worker.chunk_received.connect(self._append_chunk); self.worker.finished.connect(self._on_worker_finished); self.worker.start()
+
+
+    def _run_compare_diff_action(self, target_text: str, target_lang: str):
+        """Run diff comparison between two models."""
+        if hasattr(self, "worker") and self.worker and self.worker.isRunning():
+            try: self.worker.cancel(); self.worker.wait(500)
+            except Exception: pass
+        self.output_view.clear()
+        sys_prompt, prompt_text = self.ollama.get_action_prompt("rewrite_short", target_text, target_lang=target_lang)
+        temp = self.ollama._get_temperature_for_prompt(sys_prompt)
+        def _gen():
+            model_a = self.ollama.get_model_for_action("rewrite_short")
+            model_b = self.ollama.get_model_for_action("explain")
+            available = self.ollama.get_available_models()
+            if model_a == model_b or model_a not in available:
+                if available:
+                    model_b = available[0] if available[0] != model_a else (available[1] if len(available) > 1 else model_a)
+                else:
+                    model_b = self.ollama.default_model
+            self.status_label.setText(f"⚖️ Comparing {model_a} vs {model_b}…")
+            yield from _stream_diff(self.ollama, prompt_text, sys_prompt, model_a, model_b, temp)
+        self._current_action_name = "compare_diff"; self._current_user_input = target_text
+        self.worker = WorkerThread(_gen); self.worker.chunk_received.connect(self._append_chunk); self.worker.finished.connect(self._on_worker_finished); self.worker.start()
 
     def _append_chunk(self, chunk: str):
         filtered_text = self.think_filter.process_chunk(chunk)

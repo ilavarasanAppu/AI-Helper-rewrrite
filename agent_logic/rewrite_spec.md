@@ -1,7 +1,7 @@
 # Rewrite Mode — AI Agent Specification (`rewrite`)
 
 ## Location in Code
-`ollama_service.py:17` (`_ACTIONS["rewrite"]`) and `ollama_service.py:168` (`get_action_prompt` for `rewrite`), `gui_overlay.py:1360` (skill bypass), `ollama_service.py:118` (low temperature)
+`ollama_service.py:_ACTIONS["rewrite"]` (full GRAMMAR REWRITE ENGINE prompt), `ollama_service.py:get_action_prompt()` (DRAFT_START/END markers for rewrite_short/rewrite_long), `gui_overlay.py:_run_action()` (skill bypass for rewrite/plan/improve/answer_mode/compare_diff), `ollama_service.py:_get_temperature_for_prompt()` (auto temp 0.2 for rewrite, 0.3 for answer_mode)
 
 ## Purpose
 User provides rough draft answer text that **contains correct information/answer but has poor grammar, broken sentences, informal phrasing**. The model must return **only proper sentences** preserving meaning exactly. **DO NOT generate a new answer — only polish the draft.**
@@ -70,6 +70,9 @@ The market is a place where fruits are sold... [answering instead of fixing]
 ```
 
 ## Integration
-- Triggered by button `✍️ Rewrite` in `gui_overlay.py:1001` and chip `✍️ Rewrite` in `NearbySuggestionPopup:574`
+- Triggered by button `✍️ Rewrite` in `gui_overlay.py` `AIHelperWindow` and chip `✍️ Rewrite` in `NearbySuggestionPopup`
 - Uses `OllamaService.stream_generate(temperature=0.2)` with rewrite system prompt (no skill)
+- Uses model-aware selection: `gemma3:1b` for rewrite (falls back to default if not installed)
 - Result stored in `HistoryManager` with `action="rewrite"`
+- Also available via `⚖️ Diff` button/chip for comparing model outputs side-by-side
+- `💬 Answer` button/chip available for short answers only

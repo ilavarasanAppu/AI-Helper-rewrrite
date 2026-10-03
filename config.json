@@ -10,8 +10,8 @@
       "enabled": true,
       "endpoint": "http://localhost:11434",
       "models": [],
-      "default_model": "lfm2.5:ela",
-      "fallback_model": "qwen2.5:7b"
+      "default_model": "",
+      "fallback_model": ""
     },
     "lm_studio": {
       "enabled": true,

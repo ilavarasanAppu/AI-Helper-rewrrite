@@ -27,7 +27,7 @@
 Win-AI-Helper/
 ├── main.py                 529 lines — entry, tray, hotkeys, selection monitor
 ├── gui_overlay.py         ~1570 lines — UI: Quick Bar, Nearby Popup, History, Writing Assist
-├── ollama_service.py       ~230 lines — Ollama API client, streaming, action prompts
+├── ollama_service.py       ~400 lines — Ollama API client, streaming, action prompts, model-aware selection, diff generation
 ├── audio_service.py        168 lines — STT/TTS
 ├── image_service.py         91 lines — SD/ComfyUI image gen
 ├── skills.py                86 lines — SkillManager (prompt directives)

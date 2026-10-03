@@ -25,8 +25,18 @@ class OllamaService:
     # ── action prompt definitions ──
     _ACTIONS = {
         "rewrite": (
-            "You are an expert editor. Rewrite and polish the provided text to improve clarity, tone, "
-            "and grammar while preserving its original meaning. Return only the revised text. Do not output thinking tags or reasoning steps."
+            "GRAMMAR REWRITE ENGINE\n\n"
+            "You are an automated text improvement system. Your ONLY job is to rewrite the text that appears "
+            "between <<<DRAFT_START>>> and <<<DRAFT_END>>> markers, fixing grammar, clarity, word choice, and flow. "
+            "Return ONLY the polished version of that text - nothing else, no explanations, no thinking tags.\n\n"
+            "Anti-patterns to fix:\n"
+            "- Run-on sentences -> split or restructure\n"
+            "- Passive voice -> convert to active where possible\n"
+            "- Redundant phrases like in order to, due to the fact that -> simplify\n"
+            "- Wordy expressions -> concise alternatives\n"
+            "- Grammar errors -> correct\n"
+            "- Awkward phrasing -> rephrase naturally\n\n"
+            "Output ONLY the polished sentences. Do not include any preamble or postamble."
         ),
         "enhance": (
             "Enhance and expand the following text with richer vocabulary, better structure, and more detail. "
@@ -50,6 +60,10 @@ class OllamaService:
         "details": (
             "Provide detailed information, additional context, or deeper analysis on the following topic. "
             "Be thorough and structured. Do not output thinking tags or reasoning steps."
+        ),
+        "answer_mode": (
+            "Answer the following question or task with a short, concise response. "
+            "Do not output thinking tags, reasoning steps, or explanations. Answer only."
         ),
     }
 
@@ -103,11 +117,13 @@ class OllamaService:
         self._selected_model = model_name
 
     def stream_generate(self, prompt: str, system_prompt: str = "",
-                        model: str | None = None) -> Generator[str, None, None]:
+                        model: str | None = None,
+                        temperature: float | None = None) -> Generator[str, None, None]:
         """Stream a chat-style generation from Ollama. Yields response chunks."""
         selected_model = model or self.default_model
         self.ensure_model_loaded(selected_model)
 
+        temp = temperature if temperature is not None else 0.6
         payload = {
             "model": selected_model,
             "prompt": prompt,
@@ -115,8 +131,9 @@ class OllamaService:
             "stream": True,
             "keep_alive": self.keep_alive,
             "options": {
-                "temperature": 0.6,
-                "top_p": 0.9
+                "temperature": temp,
+                "top_p": 0.9,
+                "repeat_penalty": 1.1
             }
         }
 
@@ -152,12 +169,120 @@ class OllamaService:
                 "Enhance and expand the following text with richer vocabulary, better structure, and more detail. "
                 "Preserve the core idea but make it professional and compelling. Return only the expanded text. Do not output thinking tags or reasoning steps."
             )
+        elif action_type in ("rewrite_short", "rewrite_long"):
+            sys_prompt = self._ACTIONS.get("rewrite")
+            if action_type == "rewrite_long":
+                sys_prompt += "\nWrite a full, comprehensive rewrite that preserves all original detail."
+            text = f"<<<DRAFT_START>>>{text}<<<DRAFT_END>>>"
+            return sys_prompt, text
         else:
             sys_prompt = self._ACTIONS.get(action_type, "You are a helpful and concise Windows desktop assistant.")
         return sys_prompt, text
 
     def get_model_name(self) -> str:
         return self._selected_model or self.default_model
+
+    # Model preference mapping for actions
+    _ACTION_MODELS = {
+        "rewrite": "gemma3:1b",
+        "rewrite_short": "gemma3:1b",
+        "rewrite_long": "gemma3:1b",
+        "explain": "gemma3:1b",
+        "translate": "gemma3:1b",
+        "summarize": "gemma3:1b",
+        "answer_mode": "gemma3:1b",
+        "improve": "gemma3:1b",
+        "feather": "gemma3:1b",
+        "plan": "gemma3:1b",
+        "compare_diff": "gemma3:1b",
+        "enhance": "lfm2.5:ela",
+        "details": "lfm2.5:ela",
+    }
+
+    def get_model_for_action(self, action: str) -> str:
+        """Return preferred model for an action, falling back to default if not available."""
+        preferred = self._ACTION_MODELS.get(action)
+        if preferred and preferred in self.get_available_models():
+            return preferred
+        return self.default_model
+
+    def _get_temperature_for_prompt(self, system_prompt: str) -> float:
+        """Auto-determine temperature based on task type."""
+        sys_lower = system_prompt.lower() if system_prompt else ""
+        if "short" in sys_lower or "only the revised" in sys_lower or "answer" in sys_lower:
+            return 0.2
+        if "explain" in sys_lower or "tutor" in sys_lower or "summarize" in sys_lower:
+            return 0.3
+        if "plan" in sys_lower:
+            return 0.4
+        return 0.6
+
+    def generate_full(self, prompt: str, system_prompt: str = "",
+                      model: str | None = None,
+                      temperature: float | None = None) -> str:
+        """Generate full (non-streaming) response. Returns complete text."""
+        selected_model = model or self.default_model
+        self.ensure_model_loaded(selected_model)
+        temp_val = temperature if temperature is not None else 0.6
+        payload = {
+            "model": selected_model,
+            "prompt": prompt,
+            "system": system_prompt,
+            "stream": False,
+            "keep_alive": self.keep_alive,
+            "options": {"temperature": temp_val, "top_p": 0.9, "repeat_penalty": 1.1}
+        }
+        req = urllib.request.Request(
+            f"{self.base_url}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                return data.get("response", "")
+        except Exception as e:
+            return f"[Error generating from Ollama: {str(e)}]"
+
+    def generate_diff(self, prompt: str, system_prompt: str = "",
+                      model_a: str | None = None, model_b: str | None = None,
+                      temperature: float | None = None) -> str:
+        """Generate responses from two models and return a diff."""
+        if model_a is None:
+            model_a = self.get_model_for_action("rewrite_short")
+        if model_b is None:
+            available = self.get_available_models()
+            model_b = available[0] if available and available[0] != model_a else self.default_model
+        temp = temperature if temperature is not None else 0.6
+        result_a = self.generate_full(prompt, system_prompt, model=model_a, temperature=temp)
+        result_b = self.generate_full(prompt, system_prompt, model=model_b, temperature=temp)
+        return self._format_diff(result_a, result_b, model_a, model_b)
+
+    @staticmethod
+    def _format_diff(result_a: str, result_b: str, model_a: str, model_b: str) -> str:
+        """Format a side-by-side diff between two model outputs."""
+        import difflib
+        lines_a = result_a.strip().split("\n")
+        lines_b = result_b.strip().split("\n")
+        output = []
+        output.append(f"Model A: {model_a}")
+        output.append(f"Model B: {model_b}")
+        output.append("")
+        max_lines = max(len(lines_a), len(lines_b))
+        for i in range(max_lines):
+            left = lines_a[i] if i < len(lines_a) else ""
+            right = lines_b[i] if i < len(lines_b) else ""
+            marker = " " if left == right else " ≠ "
+            output.append(f"L[{i+1}] {marker} {left}")
+            output.append(f"R[{i+1}] {marker} {right}")
+            output.append("")
+        diff = difflib.unified_diff(lines_a, lines_b, fromfile=model_a, tofile=model_b, lineterm="")
+        diff_text = "\n".join(diff)
+        if diff_text.strip():
+            output.append("")
+            output.append("=== Unified Diff ===")
+            output.append(diff_text)
+        return "\n".join(output)
 
     def set_model(self, model_name: str):
         """Dynamically switch active model."""
