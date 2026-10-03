@@ -1,7 +1,7 @@
 {
   "ollama_url": "http://localhost:11434",
-  "default_model": "lfm2.5:ela",
-  "fallback_model": "qwen2.5:7b",
+  "default_model": "spark-x2.5-4b-abliterated-fit-quality-3.15gib-q6_k:latest",
+  "fallback_model": "spark-x2.5-4b-abliterated-fit-quality-3.15gib-q6_k:latest",
   "keep_alive": "2m",
   "theme": "system",
   "ai_provider": "ollama",
@@ -9,9 +9,19 @@
     "ollama": {
       "enabled": true,
       "endpoint": "http://localhost:11434",
-      "models": [],
-      "default_model": "",
-      "fallback_model": ""
+      "models": [
+        "nomic-embed-text:latest",
+        "qwen3.5:0.8b",
+        "gemma4:e2b",
+        "Meimo:moe",
+        "mimo_v2.6:9b",
+        "LFM2.5_Un:8b",
+        "spark-x2.5-4b-abliterated-fit-quality-3.15gib-q6_k:latest",
+        "phi_vision:ela",
+        "nemotron-3-ultra:cloud"
+      ],
+      "default_model": "spark-x2.5-4b-abliterated-fit-quality-3.15gib-q6_k:latest",
+      "fallback_model": "spark-x2.5-4b-abliterated-fit-quality-3.15gib-q6_k:latest"
     },
     "lm_studio": {
       "enabled": true,

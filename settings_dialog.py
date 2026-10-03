@@ -242,16 +242,31 @@ class SettingsDialog(QDialog):
             self.api_key_input.hide()
         
         # Load model lists
-        self._populate_model_lists(provider_config.get("models", []))
+        self._populate_model_lists(
+            provider_config.get("models", []),
+            provider_config.get("default_model", ""),
+            provider_config.get("fallback_model", "")
+        )
     
-    def _populate_model_lists(self, models):
-        """Populate model dropdown lists"""
+    def _populate_model_lists(self, models, default_model=None, fallback_model=None):
+        """Populate model dropdown lists and restore saved selections"""
         self.default_model_combo.clear()
         self.fallback_model_combo.clear()
         
         if models:
             self.default_model_combo.addItems(models)
             self.fallback_model_combo.addItems(models)
+            
+            # Restore saved default/fallback model selections if present in the list
+            if default_model and default_model in models:
+                self.default_model_combo.setCurrentText(default_model)
+            elif self.default_model_combo.count() > 0:
+                self.default_model_combo.setCurrentIndex(0)
+            
+            if fallback_model and fallback_model in models:
+                self.fallback_model_combo.setCurrentText(fallback_model)
+            elif self.fallback_model_combo.count() > 0:
+                self.fallback_model_combo.setCurrentIndex(0)
     
     def _load_provider_models(self):
         """Load models from the selected provider"""
@@ -275,10 +290,17 @@ class SettingsDialog(QDialog):
         """Handle successful model loading"""
         self.load_models_btn.setText("✓ Models Loaded")
         self.load_models_btn.setEnabled(True)
-        self._populate_model_lists(models)
+        
+        # Restore saved defaults if available from config
+        provider = self.provider_combo.currentText()
+        provider_config = self.config.get("providers", {}).get(provider, {})
+        self._populate_model_lists(
+            models,
+            provider_config.get("default_model", ""),
+            provider_config.get("fallback_model", "")
+        )
         
         # Update config with loaded models
-        provider = self.provider_combo.currentText()
         if "providers" not in self.config:
             self.config["providers"] = {}
         if provider not in self.config["providers"]:

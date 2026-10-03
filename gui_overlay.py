@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFrame, QScrollArea, QApplication, QMessageBox,
     QComboBox, QCompleter, QDialog, QFormLayout, QMenu
 )
-from PySide6.QtGui import QFont, QColor, QPalette, QClipboard, QPixmap, QPainter, QCursor, QAction
+from PySide6.QtGui import QFont, QColor, QPalette, QClipboard, QPixmap, QPainter, QCursor, QAction, QMouseEvent
 import os
 import re
 import time
@@ -21,6 +21,8 @@ class SettingsDialog(QDialog):
         self.config = config
         self.setWindowTitle("⚙ Settings")
         self.resize(520, 420)
+        self._drag_active = False
+        self._drag_start_pos = None
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -37,7 +39,6 @@ class SettingsDialog(QDialog):
         self.api_key_input = QLineEdit(self)
         self.api_key_input.setPlaceholderText("Bearer key (for OpenAI)")
         self.api_key_input.setVisible(False)
-        self.model_combo = QComboBox(self)
         self.default_model_combo = QComboBox(self)
         self.fallback_model_combo = QComboBox(self)
 
@@ -45,7 +46,6 @@ class SettingsDialog(QDialog):
         form.addRow("Provider", self.provider_combo)
         form.addRow("Endpoint", self.endpoint_input)
         form.addRow("API Key", self.api_key_input)
-        form.addRow("Model", self.model_combo)
         form.addRow("Default Model", self.default_model_combo)
         form.addRow("Fallback Model", self.fallback_model_combo)
         layout.addLayout(form)
@@ -65,6 +65,23 @@ class SettingsDialog(QDialog):
         self._refresh_provider_state()
         self._load_saved_values()
 
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            self._drag_active = True
+            self._drag_start_pos = event.globalPosition().toQPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._drag_active and self._drag_start_pos is not None:
+            self.move(event.globalPosition().toQPoint() - self._drag_start_pos)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            self._drag_active = False
+            self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
     def _load_saved_values(self):
         provider = self.provider_combo.currentText().lower()
         providers = self.config.get("providers", {})
@@ -76,13 +93,9 @@ class SettingsDialog(QDialog):
         # Populate models from saved config first, then try to fetch live
         saved_models = provider_cfg.get("models", [])
         if saved_models:
-            self._populate_model_lists(saved_models)
+            self._populate_model_lists(saved_models, provider_cfg.get("default_model", ""), provider_cfg.get("fallback_model", ""))
         else:
             self._load_provider_models(provider, self.endpoint_input.text())
-        self.default_model_combo.setCurrentText(provider_cfg.get("default_model", ""))
-        self.fallback_model_combo.setCurrentText(provider_cfg.get("fallback_model", ""))
-        if provider == "ollama":
-            self.model_combo.setCurrentText(self.config.get("default_model", ""))
     def _refresh_provider_state(self):
         provider = self.provider_combo.currentText().lower()
         endpoint = "http://localhost:11434"
@@ -93,18 +106,36 @@ class SettingsDialog(QDialog):
         self.endpoint_input.setText(endpoint)
         # Show/hide API key input based on provider
         self.api_key_input.setVisible(provider == "openai")
-        self.model_combo.clear(); self.default_model_combo.clear(); self.fallback_model_combo.clear()
+        self.default_model_combo.clear(); self.fallback_model_combo.clear()
         self._load_provider_models(provider, endpoint)
 
-    def _populate_model_lists(self, models):
-        self.model_combo.clear(); self.default_model_combo.clear(); self.fallback_model_combo.clear()
+    def _populate_model_lists(self, models, default_model="", fallback_model=""):
+        self.default_model_combo.clear(); self.fallback_model_combo.clear()
         # Always include a fallback option so the dropdown is never empty
         if not models:
             models = ["gemma3:1b", "qwen2.5:7b", "lfm2.5:ela"]
         for name in models:
-            self.model_combo.addItem(name)
             self.default_model_combo.addItem(name)
             self.fallback_model_combo.addItem(name)
+        # Restore saved default/fallback selections if they exist in the list
+        if default_model:
+            idx = self.default_model_combo.findText(default_model)
+            if idx >= 0:
+                self.default_model_combo.setCurrentIndex(idx)
+            elif self.default_model_combo.count() > 0:
+                self.default_model_combo.setCurrentIndex(0)
+        else:
+            if self.default_model_combo.count() > 0:
+                self.default_model_combo.setCurrentIndex(0)
+        if fallback_model:
+            idx = self.fallback_model_combo.findText(fallback_model)
+            if idx >= 0:
+                self.fallback_model_combo.setCurrentIndex(idx)
+            elif self.fallback_model_combo.count() > 0:
+                self.fallback_model_combo.setCurrentIndex(0)
+        else:
+            if self.fallback_model_combo.count() > 0:
+                self.fallback_model_combo.setCurrentIndex(0)
     def _load_provider_models(self, provider, endpoint):
         models = []
         try:
@@ -132,24 +163,28 @@ class SettingsDialog(QDialog):
                 models = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
         except Exception:
             models = []
-        self._populate_model_lists(models)
+        provider_cfg = self.config.get("providers", {}).get(provider, {})
+        self._populate_model_lists(models, provider_cfg.get("default_model", ""), provider_cfg.get("fallback_model", ""))
 
     def save(self):
         provider = self.provider_combo.currentText().lower()
         endpoint = self.endpoint_input.text().strip()
-        model = self.model_combo.currentText().strip()
         default_model = self.default_model_combo.currentText().strip()
         fallback_model = self.fallback_model_combo.currentText().strip()
 
         self.config["theme"] = self.theme_combo.currentText()
         self.config["ai_provider"] = provider
-        self.config["default_model"] = model or default_model or self.config.get("default_model", "")
-        self.config["fallback_model"] = fallback_model or self.config.get("fallback_model", "")
+        self.config.setdefault("default_model", default_model or "")
+        self.config.setdefault("fallback_model", fallback_model or "")
+        if default_model:
+            self.config["default_model"] = default_model
+        if fallback_model:
+            self.config["fallback_model"] = fallback_model
         self.config.setdefault("providers", {})
         self.config["providers"][provider] = {
             "enabled": True,
             "endpoint": endpoint,
-            "models": [self.model_combo.itemText(i) for i in range(self.model_combo.count())],
+            "models": [self.default_model_combo.itemText(i) for i in range(self.default_model_combo.count())],
             "default_model": default_model,
             "fallback_model": fallback_model,
         }
@@ -730,6 +765,7 @@ class AIHelperWindow(QWidget):
         self.ollama = ollama_service; self.audio = audio_service; self.image = image_service; self.config = config
         self.history_manager = history_manager or HistoryManager(); self.skill_manager = SkillManager(); self.selected_text = ""
         self._current_action_name = "prompt"; self._current_user_input = ""; self.think_filter = ThinkFilter(on_thinking_state_change=self._on_thinking_state_changed)
+        self._drag_active = False; self._drag_start_pos = None
         self.init_ui(); self._detect_clipboard(); self._apply_theme(self.config.get("theme", "system"))
 
     def _apply_theme(self, theme_name: str):
@@ -967,6 +1003,23 @@ class AIHelperWindow(QWidget):
             cb_text = QApplication.clipboard().text();
             if cb_text and cb_text.strip(): self.selected_text = cb_text.strip()
         except Exception: pass
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            self._drag_active = True
+            self._drag_start_pos = event.globalPosition().toQPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._drag_active and self._drag_start_pos is not None:
+            self.move(event.globalPosition().toQPoint() - self._drag_start_pos)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            self._drag_active = False
+            self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
 
     def show_centered(self):
         screen = QApplication.primaryScreen().geometry(); x = (screen.width() - self.width()) // 2; y = (screen.height() - self.height()) // 3; self.move(x, y)
