@@ -65,6 +65,14 @@ class OllamaService:
             "Answer the following question or task with a short, concise response. "
             "Do not output thinking tags, reasoning steps, or explanations. Answer only."
         ),
+
+        "nearby_suggestion": (
+            "SUGGESTION ENGINE\n\n"
+            "You are a smart desktop assistant that generates a single, concise, actionable suggestion "
+            "based on the text the user just selected or copied. "
+            "The suggestion should be short, practical, and directly useful. "
+            "Return ONLY the suggestion text. Do not output thinking tags or reasoning steps."
+        ),
     }
 
     def __init__(self, base_url: str = "http://localhost:11434",
@@ -191,6 +199,7 @@ class OllamaService:
         "translate": "gemma3:1b",
         "summarize": "gemma3:1b",
         "answer_mode": "gemma3:1b",
+        "nearby_suggestion": "gemma3:1b",
         "improve": "gemma3:1b",
         "feather": "gemma3:1b",
         "plan": "gemma3:1b",

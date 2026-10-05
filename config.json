@@ -1,6 +1,6 @@
 {
   "ollama_url": "http://localhost:11434",
-  "default_model": "qwen3.5:0.8b",
+  "default_model": "nemotron-3-ultra:cloud",
   "fallback_model": "gemma4:e2b",
   "keep_alive": "2m",
   "theme": "system",
@@ -20,7 +20,7 @@
         "phi_vision:ela",
         "nemotron-3-ultra:cloud"
       ],
-      "default_model": "qwen3.5:0.8b",
+      "default_model": "nemotron-3-ultra:cloud",
       "fallback_model": "gemma4:e2b"
     },
     "lm_studio": {

@@ -68,12 +68,12 @@ class SettingsDialog(QDialog):
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
             self._drag_active = True
-            self._drag_start_pos = event.globalPosition().toQPoint() - self.frameGeometry().topLeft()
+            self._drag_start_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if self._drag_active and self._drag_start_pos is not None:
-            self.move(event.globalPosition().toQPoint() - self._drag_start_pos)
+            self.move(event.globalPosition().toPoint() - self._drag_start_pos)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
@@ -611,6 +611,7 @@ class NearbySuggestionPopup(QWidget):
     def _apply_selection_suggestion(self):
         sug = self._current_suggestion()
         if not sug or not self.suggest_apply_btn.isEnabled(): return
+        self.expand_requested.emit('', sug)
         src_hwnd = self._source_hwnd; snapshot = self._snapshot_clipboard(); self.hide(); QTimer.singleShot(100, lambda: self._focus_window(src_hwnd)); QTimer.singleShot(350, lambda: self._attempt_paste(src_hwnd, sug, snapshot, 0))
 
     def _snapshot_clipboard(self):
@@ -758,6 +759,82 @@ class NearbySuggestionPopup(QWidget):
         if event.key() == Qt.Key_Escape: self.hide()
         else: super().keyPressEvent(event)
 
+
+    def show_near_position(self, text, x=None, y=None, trigger_type='selection'):
+        if not text or not text.strip():
+            return
+        self.selected_text = text.strip()
+        self._last_trigger_type = trigger_type
+        if self.suggest_worker and self.suggest_worker.isRunning():
+            try:
+                self.suggest_worker.terminate()
+                self.suggest_worker.wait(300)
+            except Exception:
+                pass
+        self._enter_suggestion_mode()
+        self._position_near(x, y)
+        self._generate_suggestion()
+
+    def _position_near(self, x=None, y=None):
+        try:
+            if x is None or y is None or x == 0 or y == 0:
+                cursor_pos = QCursor.pos()
+            else:
+                cursor_pos = QPoint(x, y)
+            screen = QApplication.primaryScreen().geometry()
+            w = self.width() or 360
+            h = self.height() or 120
+            px = min(cursor_pos.x() + 15, screen.width() - w - 20)
+            py = min(cursor_pos.y() + 15, screen.height() - h - 20)
+            px = max(20, px)
+            py = max(20, py)
+            self.move(px, py)
+        except Exception:
+            pass
+        self.show()
+        self.raise_()
+
+    def _generate_suggestion(self):
+        self._last_action = 'nearby_suggestion'
+        self._last_prompt = self.selected_text
+        sys_prompt = self.ollama._ACTIONS.get('nearby_suggestion', 'You are a helpful desktop assistant.')
+        prompt = self.selected_text
+        model = self.ollama.get_model_for_action('nearby_suggestion')
+        temp = self.ollama._get_temperature_for_prompt(sys_prompt)
+        def _gen():
+            yield from self.ollama.stream_generate(prompt, system_prompt=sys_prompt, model=model, temperature=temp)
+        if self.suggest_worker and self.suggest_worker.isRunning():
+            try:
+                self.suggest_worker.terminate()
+                self.suggest_worker.wait(300)
+            except Exception:
+                pass
+        self.suggest_label.setText('')
+        self.suggest_filter.reset()
+        self.suggest_worker = WorkerThread(_gen)
+        self.suggest_worker.chunk_received.connect(self._append_suggestion_chunk)
+        self.suggest_worker.finished.connect(self._on_suggestion_finished)
+        self.suggest_worker.start()
+
+    def _append_suggestion_chunk(self, chunk):
+        filtered = self.suggest_filter.process_chunk(chunk)
+        if filtered:
+            self.suggest_label.setText(self.suggest_label.text() + filtered)
+            self.adjustSize()
+
+    def _on_suggestion_finished(self):
+        flushed = self.suggest_filter.flush()
+        if flushed:
+            self.suggest_label.setText(self.suggest_label.text() + flushed)
+        sug = self._current_suggestion()
+        if sug:
+            self.suggest_apply_btn.setEnabled(True)
+            self.suggest_copy_btn.setEnabled(True)
+            self.status_label.setText('✓ Ready')
+            self.status_label.show()
+        else:
+            self.suggest_label.setText('✗ No suggestion generated')
+        self.adjustSize()
 
 class AIHelperWindow(QWidget):
     def __init__(self, ollama_service, audio_service, image_service, config, history_manager=None):
@@ -1007,12 +1084,12 @@ class AIHelperWindow(QWidget):
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
             self._drag_active = True
-            self._drag_start_pos = event.globalPosition().toQPoint() - self.frameGeometry().topLeft()
+            self._drag_start_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if self._drag_active and self._drag_start_pos is not None:
-            self.move(event.globalPosition().toQPoint() - self._drag_start_pos)
+            self.move(event.globalPosition().toPoint() - self._drag_start_pos)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
