@@ -47,7 +47,7 @@
   "sd_api_url": "http://127.0.0.1:7860/sdapi/v1/txt2img",
   "whisper_model_size": "base",
   "tts_rate": 180,
-  "enable_clipboard_monitor": true,
+  "enable_clipboard_monitor": false,
   "clipboard_poll_interval_ms": 500,
   "history_store_success_only": true,
   "history_store_initiated": true,
